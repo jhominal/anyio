@@ -24,7 +24,7 @@ from typing import (
     Callable,
     Collection,
     ContextManager,
-    Coroutine,
+    Generator,
     Generic,
     Mapping,
     MutableSequence,
@@ -816,6 +816,7 @@ class TestRunner(abc.TestRunner):
         self._scope_task_managers[scope] = result
         return result
 
+    @overload
     def _call_in_runner_task(
         self,
         scope: str,
@@ -823,6 +824,25 @@ class TestRunner(abc.TestRunner):
         *args: object,
         **kwargs: object,
     ) -> T_Retval:
+        ...
+
+    @overload
+    def _call_in_runner_task(
+        self,
+        scope: str,
+        func: Callable[..., T_Retval],
+        *args: object,
+        **kwargs: object,
+    ) -> T_Retval:
+        ...
+
+    def _call_in_runner_task(
+        self,
+        scope: str,
+        func: Callable[..., Any],
+        *args: object,
+        **kwargs: object,
+    ) -> Any:
         if self._end_event is None:
             trio.lowlevel.start_guest_run(
                 self._wait_for_end,
@@ -860,17 +880,52 @@ class TestRunner(abc.TestRunner):
             self._call_in_runner_task(scope, asyncgen.aclose)
             raise RuntimeError("Async generator fixture did not stop")
 
-    def run_fixture(
+    def run_generator_fixture(
         self,
-        fixture_func: Callable[..., Coroutine[Any, Any, T_Retval]],
+        fixture_func: Callable[..., Generator[T_Retval, Any, Any]],
         kwargs: dict[str, Any],
         scope: str = "function",
+    ) -> Iterable[T_Retval]:
+        asyncgen = fixture_func(**kwargs)
+        fixturevalue: T_Retval = self._call_in_runner_task(scope, asyncgen.send, None)
+
+        yield fixturevalue
+
+        try:
+            self._call_in_runner_task(scope, asyncgen.send, None)
+        except StopAsyncIteration:
+            pass
+        else:
+            self._call_in_runner_task(scope, asyncgen.close)
+            raise RuntimeError("Generator fixture did not stop")
+
+    @overload
+    def run_fixture(
+        self,
+        fixture_func: Callable[..., Awaitable[T_Retval]],
+        kwargs: dict[str, Any],
+        scope: str = ...,
     ) -> T_Retval:
+        ...
+
+    @overload
+    def run_fixture(
+        self,
+        fixture_func: Callable[..., T_Retval],
+        kwargs: dict[str, Any],
+        scope: str = ...,
+    ) -> T_Retval:
+        ...
+
+    def run_fixture(
+        self,
+        fixture_func: Callable,
+        kwargs: dict[str, Any],
+        scope: str = "function",
+    ) -> Any:
         return self._call_in_runner_task(scope, fixture_func, **kwargs)
 
-    def run_test(
-        self, test_func: Callable[..., Coroutine[Any, Any, Any]], kwargs: dict[str, Any]
-    ) -> None:
+    def run_test(self, test_func: Callable[..., Any], kwargs: dict[str, Any]) -> None:
         self._call_in_runner_task("function", test_func, **kwargs)
 
     def close_scope(self, scope: str) -> None:

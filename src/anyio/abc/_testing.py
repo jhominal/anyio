@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import types
 from abc import ABCMeta, abstractmethod
-from collections.abc import AsyncGenerator, Callable, Coroutine, Iterable
-from typing import Any, TypeVar
+from collections.abc import AsyncGenerator, Awaitable, Callable, Generator, Iterable
+from typing import Any, TypeVar, overload
 
 _T = TypeVar("_T")
 
@@ -43,14 +43,48 @@ class TestRunner(metaclass=ABCMeta):
         """
 
     @abstractmethod
-    def run_fixture(
+    def run_generator_fixture(
         self,
-        fixture_func: Callable[..., Coroutine[Any, Any, _T]],
+        fixture_func: Callable[..., Generator[_T, Any, Any]],
         kwargs: dict[str, Any],
         scope: str = "function",
-    ) -> _T:
+    ) -> Iterable[_T]:
         """
-        Run an async fixture.
+        Run a generator fixture.
+
+        :param fixture_func: the fixture function
+        :param kwargs: keyword arguments to call the fixture function with
+        :param scope: the pytest scope in which the fixture is defined
+        :return: an iterator yielding the value yielded from the generator
+        """
+
+    @overload
+    def run_fixture(
+        self,
+        fixture_func: Callable[..., Awaitable[_T]],
+        kwargs: dict[str, Any],
+        scope: str = ...,
+    ) -> _T:
+        ...
+
+    @overload
+    def run_fixture(
+        self,
+        fixture_func: Callable[..., _T],
+        kwargs: dict[str, Any],
+        scope: str = ...,
+    ) -> _T:
+        ...
+
+    @abstractmethod
+    def run_fixture(
+        self,
+        fixture_func: Callable,
+        kwargs: dict[str, Any],
+        scope: str = "function",
+    ) -> Any:
+        """
+        Run a fixture, async or synchronous.
 
         :param fixture_func: the fixture function
         :param kwargs: keyword arguments to call the fixture function with
@@ -59,9 +93,7 @@ class TestRunner(metaclass=ABCMeta):
         """
 
     @abstractmethod
-    def run_test(
-        self, test_func: Callable[..., Coroutine[Any, Any, Any]], kwargs: dict[str, Any]
-    ) -> None:
+    def run_test(self, test_func: Callable[..., Any], kwargs: dict[str, Any]) -> None:
         """
         Run an async test function.
 

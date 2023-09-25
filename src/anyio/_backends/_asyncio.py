@@ -48,12 +48,14 @@ from typing import (
     Collection,
     ContextManager,
     Coroutine,
+    Generator,
     Mapping,
     Optional,
     Sequence,
     Tuple,
     TypeVar,
     cast,
+    overload,
 )
 from weakref import WeakKeyDictionary
 
@@ -1928,6 +1930,7 @@ class TestRunner(abc.TestRunner):
         self._scope_task_managers[scope] = result
         return result
 
+    @overload
     async def _call_in_runner_task(
         self,
         scope: str,
@@ -1935,6 +1938,25 @@ class TestRunner(abc.TestRunner):
         *args: object,
         **kwargs: object,
     ) -> T_Retval:
+        ...
+
+    @overload
+    async def _call_in_runner_task(
+        self,
+        scope: str,
+        func: Callable[..., T_Retval],
+        *args: object,
+        **kwargs: object,
+    ) -> T_Retval:
+        ...
+
+    async def _call_in_runner_task(
+        self,
+        scope: str,
+        func: Callable[..., Any],
+        *args: object,
+        **kwargs: object,
+    ) -> Any:
         task_manager = await self._get_task_manager(scope)
         return await task_manager.call_in_task(func, *args, **kwargs)
 
@@ -1962,21 +1984,61 @@ class TestRunner(abc.TestRunner):
             self.get_loop().run_until_complete(asyncgen.aclose())
             raise RuntimeError("Async generator fixture did not stop")
 
-    def run_fixture(
+    def run_generator_fixture(
         self,
-        fixture_func: Callable[..., Coroutine[Any, Any, T_Retval]],
+        fixture_func: Callable[..., Generator[T_Retval, Any, Any]],
         kwargs: dict[str, Any],
         scope: str = "function",
+    ) -> Iterable[T_Retval]:
+        generator = fixture_func(**kwargs)
+        fixturevalue: T_Retval = self.get_loop().run_until_complete(
+            self._call_in_runner_task(scope, generator.send, None)
+        )
+        self._raise_async_exceptions()
+
+        yield fixturevalue
+
+        try:
+            self.get_loop().run_until_complete(
+                self._call_in_runner_task(scope, generator.send, None)
+            )
+        except StopAsyncIteration:
+            self._raise_async_exceptions()
+        else:
+            generator.close()
+            raise RuntimeError("Generator fixture did not stop")
+
+    @overload
+    def run_fixture(
+        self,
+        fixture_func: Callable[..., Awaitable[T_Retval]],
+        kwargs: dict[str, Any],
+        scope: str = ...,
     ) -> T_Retval:
+        ...
+
+    @overload
+    def run_fixture(
+        self,
+        fixture_func: Callable[..., T_Retval],
+        kwargs: dict[str, Any],
+        scope: str = ...,
+    ) -> T_Retval:
+        ...
+
+    def run_fixture(
+        self,
+        fixture_func: Callable,
+        kwargs: dict[str, Any],
+        scope: str = "function",
+    ) -> Any:
         retval = self.get_loop().run_until_complete(
             self._call_in_runner_task(scope, fixture_func, **kwargs)
         )
         self._raise_async_exceptions()
         return retval
 
-    def run_test(
-        self, test_func: Callable[..., Coroutine[Any, Any, Any]], kwargs: dict[str, Any]
-    ) -> None:
+    def run_test(self, test_func: Callable[..., Any], kwargs: dict[str, Any]) -> None:
         try:
             self.get_loop().run_until_complete(
                 self._call_in_runner_task("function", test_func, **kwargs)
