@@ -29,6 +29,7 @@ from inspect import (
     CORO_RUNNING,
     CORO_SUSPENDED,
     getcoroutinestate,
+    isawaitable,
     iscoroutine,
 )
 from io import IOBase
@@ -1809,20 +1810,22 @@ def _create_task_info(task: asyncio.Task) -> TaskInfo:
 
 
 class _TaskManager:
-    _send_stream: MemoryObjectSendStream[tuple[Awaitable[Any], asyncio.Future[Any]]]
+    _send_stream: MemoryObjectSendStream[tuple[Callable[[], Any], asyncio.Future[Any]]]
     _task: asyncio.Task
     _loop: asyncio.AbstractEventLoop
 
     @staticmethod
     async def _run_coroutines(
         receive_stream: MemoryObjectReceiveStream[
-            tuple[Awaitable[Any], asyncio.Future[Any]]
+            tuple[Callable[[], Any], asyncio.Future[Any]]
         ],
     ) -> None:
         with receive_stream:
-            async for coro, future in receive_stream:
+            async for call, future in receive_stream:
                 try:
-                    retval = await coro
+                    retval = call()
+                    if isawaitable(retval):
+                        retval = await retval
                 except BaseException as exc:
                     if not future.cancelled():
                         future.set_exception(exc)
@@ -1833,16 +1836,19 @@ class _TaskManager:
     def __init__(self, loop: asyncio.AbstractEventLoop):
         self._loop = loop
         self._send_stream, receive_stream = create_memory_object_stream[
-            Tuple[Awaitable[Any], asyncio.Future]
+            Tuple[Callable[[], Any], asyncio.Future]
         ](1)
         self._task = loop.create_task(self._run_coroutines(receive_stream))
 
     async def call_in_task(
-        self, func: Callable[..., Awaitable[T_Retval]], *args: object, **kwargs: object
+        self,
+        func: Callable[..., Awaitable[T_Retval] | T_Retval],
+        *args: object,
+        **kwargs: object,
     ) -> T_Retval:
-        coro = func(*args, **kwargs)
+        call = partial(func, *args, **kwargs)
         future: asyncio.Future[T_Retval] = self._loop.create_future()
-        self._send_stream.send_nowait((coro, future))
+        self._send_stream.send_nowait((call, future))
         return await future
 
     def shutdown(self) -> None:
@@ -1903,9 +1909,6 @@ class TestRunner(abc.TestRunner):
                     "Multiple exceptions occurred in asynchronous callbacks", exceptions
                 )
 
-    async def _create_task(self) -> _TaskManager:
-        return _TaskManager(self.get_loop())
-
     async def _get_task_manager(self, scope: str) -> _TaskManager:
         if scope not in self.scopes:
             raise ValueError(f"Unknown scope '{scope}'")
@@ -1919,9 +1922,9 @@ class TestRunner(abc.TestRunner):
                 break
 
         if parent_task is None:
-            result = await self._create_task()
+            result = _TaskManager(self.get_loop())
         else:
-            result = await parent_task.call_in_task(self._create_task)
+            result = await parent_task.call_in_task(_TaskManager, self.get_loop())
         self._scope_task_managers[scope] = result
         return result
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import array
 import contextvars
+import inspect
 import math
 import socket
 import sys
@@ -724,20 +725,22 @@ class _SignalReceiver:
 
 class _TaskManager:
     _send_stream: MemoryObjectSendStream[
-        tuple[Awaitable[Any], MutableSequence[Outcome]]
+        tuple[Callable[[], Any], MutableSequence[Outcome]]
     ]
     task: trio.lowlevel.Task
 
     @staticmethod
     async def _run_coroutines(
         receive_stream: MemoryObjectReceiveStream[
-            tuple[Awaitable[Any], MutableSequence[Outcome]]
+            tuple[Callable[[], Any], MutableSequence[Outcome]]
         ],
     ) -> None:
         with receive_stream:
-            async for coro, outcome_holder in receive_stream:
+            async for call, outcome_holder in receive_stream:
                 try:
-                    retval = await coro
+                    retval = call()
+                    if inspect.isawaitable(retval):
+                        retval = await retval
                 except BaseException as exc:
                     outcome_holder.append(Error(exc))
                 else:
@@ -745,7 +748,7 @@ class _TaskManager:
 
     def __init__(self, context: contextvars.Context) -> None:
         self._send_stream, receive_stream = create_memory_object_stream[
-            Tuple[Awaitable[Any], MutableSequence[Outcome]]
+            Tuple[Callable[[], Any], MutableSequence[Outcome]]
         ](1)
         self.task = trio.lowlevel.spawn_system_task(
             self._run_coroutines,
@@ -754,10 +757,11 @@ class _TaskManager:
         )
 
     def call_in_task(
-        self, func: Callable[..., Awaitable[Any]], *args: object, **kwargs: object
+        self, func: Callable[..., Any], *args: object, **kwargs: object
     ) -> list[Outcome]:
+        call: Callable[[], Any] = partial(func, *args, **kwargs)
         outcome_holder: list[Outcome] = []
-        self._send_stream.send_nowait((func(*args, **kwargs), outcome_holder))
+        self._send_stream.send_nowait((call, outcome_holder))
         return outcome_holder
 
     def shutdown(self) -> None:
